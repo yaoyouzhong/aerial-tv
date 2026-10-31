@@ -101,6 +101,9 @@ dependencies {
     // Compose 1.9.5, the last release that runs on Android 5.0 (1.10 raised minSdk to 23).
     val composeBom = platform("androidx.compose:compose-bom:2025.11.01")
     implementation(composeBom)
+    testImplementation(composeBom)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.animation:animation")
