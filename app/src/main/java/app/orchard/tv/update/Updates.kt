@@ -202,6 +202,8 @@ object Updates {
         NotOfficial,
         /** The downloaded APK is no newer than this one (the website not yet updated). */
         NotNewer,
+        /** A self-compile installation is still being resolved. */
+        SelfCompileBusy,
     }
 
     /** The official package. Copies renamed for one firmware (OPPO, see docs/devices) cannot update from the release. */
@@ -219,7 +221,15 @@ object Updates {
      * ACTION_VIEW on the APK makes the installer itself the one installing. The APK must be this package, signed
      * with this copy's key and no older, or the installer would only fail with a less clear message.
      */
+    internal fun updateBusy(): Boolean =
+        install is Install.Downloading || install == Install.Waiting || install == Install.Opened ||
+            install == Install.NeedsPermission || install == Install.NeedsStoragePermission || awaiting != null
+
     fun install(context: Context) {
+        if (SelfCompile.isBusy(context)) {
+            install = Install.Failed(Failure.SelfCompileBusy)
+            return
+        }
         if (install is Install.Downloading || install == Install.Opened) return
         // A second press while the first session's confirmation is awaited (#1004: two sessions).
         if (awaiting != null) return
@@ -304,28 +314,34 @@ object Updates {
     }
 
     /**
-     * The running APK over itself with its own dex metadata (SelfCompile): no download, the same
-     * version. Without the metadata it would be pointless, so no fallback: a failure is only logged.
-     * [auto]: nobody asked, so a confirmation page is not put in front of the app being watched.
+     * Reinstall the running APK with its own dex metadata. No APK-only fallback: it would not
+     * perform the requested optimization. The caller owns the persisted attempt and result.
      */
     @RequiresApi(28)
-    internal fun reinstallSelf(app: Context, auto: Boolean) {
-        val apk = File(app.applicationInfo.sourceDir)
-        val dm = dexMetadata(apk) ?: return
-        runCatching {
-            val result = Intent(app, UpdateResult::class.java).putExtra(EXTRA_WITH_DM, true)
+    internal fun reinstallSelf(app: Context, auto: Boolean, token: String) {
+        try {
+            val apk = File(app.applicationInfo.sourceDir)
+            val dm = dexMetadata(apk) ?: throw IllegalStateException("Missing dex metadata")
+            val result = Intent(app, UpdateResult::class.java)
+                .setData(Uri.parse("aerial-self://attempt/" + token))
+                .putExtra(EXTRA_WITH_DM, true)
                 .putExtra(EXTRA_SELF, if (auto) SELF_AUTO else SELF_ASKED)
-            val id = commitSession(app, apk, dm, result)
-            Log.i(TAG, "self compile: session $id committed, dex metadata ${dm.size}")
-        }.onFailure {
-            Log.w(TAG, "self compile: no session", it)
-            DiagLog.i("self compile: no session (${it.javaClass.simpleName}: ${it.message})")
+                .putExtra(EXTRA_SELF_TOKEN, token)
+            val id = commitSession(app, apk, dm, result) { SelfCompile.sessionCreated(app, it) }
+            SelfCompile.sessionCommitted(app, id)
+            Log.i(TAG, "self compile: session " + id + " committed, dex metadata " + dm.size)
+        } catch (error: Exception) {
+            Log.w(TAG, "self compile: no session", error)
+            DiagLog.i("self compile: no session (" + error.javaClass.simpleName + ": " + error.message + ")")
+            SelfCompile.startFailed(app, error)
         }
     }
 
     /** Writes [file] (and [dm] beside it) into a new install session and commits it; returns its id. */
     @RequiresApi(28)
-    private fun commitSession(app: Context, file: File, dm: ByteArray?, result: Intent): Int {
+    private fun commitSession(
+        app: Context, file: File, dm: ByteArray?, result: Intent, onCreated: ((Int) -> Unit)? = null,
+    ): Int {
         val installer = app.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(app.packageName)
@@ -339,6 +355,7 @@ object Updates {
         }
         val id = installer.createSession(params)
         try {
+            onCreated?.invoke(id)
             installer.openSession(id).use { session ->
                 file.inputStream().use { input ->
                     session.openWrite("aerial.apk", 0, file.length()).use { out ->
@@ -374,7 +391,8 @@ object Updates {
     }.getOrNull()
 
     private const val EXTRA_WITH_DM = "app.orchard.tv.update.WITH_DM"
-    private const val EXTRA_SELF = "app.orchard.tv.update.SELF"
+    internal const val EXTRA_SELF = "app.orchard.tv.update.SELF"
+    internal const val EXTRA_SELF_TOKEN = "app.orchard.tv.update.SELF_TOKEN"
     private const val SELF_ASKED = 1
     private const val SELF_AUTO = 2
 
@@ -447,11 +465,11 @@ object Updates {
     }
 
     /** The session's answer (UpdateResult): the owner's confirmation, or the installer instead. */
-    internal fun onSessionResult(context: Context, intent: Intent) {
+    internal fun onSessionResult(context: Context, intent: Intent, onFinished: () -> Unit = {}) {
         val app = context.applicationContext
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
         val self = intent.getIntExtra(EXTRA_SELF, 0)
-        if (self != 0) return onSelfResult(app, intent, status, auto = self == SELF_AUTO)
+        if (self != 0) return SelfCompile.onResult(app, intent, status, onFinished)
         val id = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
         if (id in abandoned) {
             Log.i(TAG, "session $id answered ($status) after it was given up")
@@ -501,25 +519,6 @@ object Updates {
             Log.w(TAG, "could not ask to confirm the update; opening the installer", it)
             giveUpOnSession(app, id, "session $id has no confirmation page (${it.javaClass.simpleName})")
         }
-    }
-
-    /** The answer to [reinstallSelf]: never the installer by ACTION_VIEW, which would carry no metadata. */
-    private fun onSelfResult(app: Context, intent: Intent, status: Int, auto: Boolean) {
-        val id = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
-        // Arrives in the new process, once the replace is done.
-        if (status == PackageInstaller.STATUS_SUCCESS) {
-            DiagLog.i("self compile: installed, odex ${SelfCompile.odexBytes(app)?.div(1024)} KB")
-            return
-        }
-        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION && !auto) {
-            @Suppress("DEPRECATION")
-            val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
-            if (confirm != null && runCatching { app.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess) return
-        }
-        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION && id >= 0) runCatching { app.packageManager.packageInstaller.abandonSession(id) }
-        val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-        Log.w(TAG, "self compile: not installed ($status, $message)")
-        DiagLog.i("self compile: not installed ($status, $message)")
     }
 
     /** Resume failed checks; if the installer closed without replacing Aerial, reset its button. */

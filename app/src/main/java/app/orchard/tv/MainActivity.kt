@@ -955,6 +955,7 @@ class MainActivity : ComponentActivity() {
         GuardSetup.setHomeInFront(this, true)
         HomeGuardService.onAerialResumed()
         Updates.onHomeResumed()
+        SelfCompile.onHomeResumed(this)
         vm.refreshSystem()
         if (!resumedInProcess) {
             resumedInProcess = true
@@ -986,6 +987,7 @@ class MainActivity : ComponentActivity() {
         vm.resumed = false
         KidsWatch.homeInFront = false
         Updates.onHomePaused()
+        SelfCompile.onHomePaused()
         DiagLog.i("onPause")
         leftForAnApp = openedAppSinceHome
         GuardSetup.setHomeInFront(this, false)

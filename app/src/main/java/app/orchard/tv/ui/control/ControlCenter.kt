@@ -370,7 +370,40 @@ private fun MainPage(vm: HomeViewModel, now: LocalDateTime, takeFocus: Boolean, 
         // which needs the owner's confirmation there (SelfCompile; 12+ does it by itself).
         LaunchedEffect(Unit) { SelfCompile.recheck(context) }
         if (SelfCompile.offered) {
-            MenuRow(Glyph.Download, stringResource(R.string.cc_self_compile), onClick = { SelfCompile.run(context, auto = false) })
+            val label = when (SelfCompile.notice) {
+                SelfCompile.Notice.Waiting -> R.string.cc_self_compile_waiting
+                SelfCompile.Notice.RecoveryRequired -> R.string.cc_self_compile_stop_waiting
+                SelfCompile.Notice.Rejected, SelfCompile.Notice.Cancelled,
+                SelfCompile.Notice.ConfirmationRequired, SelfCompile.Notice.Interrupted,
+                SelfCompile.Notice.Detached, SelfCompile.Notice.Failed -> R.string.cc_self_compile_retry
+                else -> R.string.cc_self_compile
+            }
+            MenuRow(Glyph.Download, stringResource(label), onClick = {
+                if (SelfCompile.notice == SelfCompile.Notice.RecoveryRequired) SelfCompile.stopWaiting(context)
+                else SelfCompile.run(context, auto = false)
+            })
+        }
+        val selfCompileNotice = when (SelfCompile.notice) {
+            SelfCompile.Notice.None -> null
+            SelfCompile.Notice.Waiting -> R.string.cc_self_compile_waiting_detail
+            SelfCompile.Notice.Rejected -> R.string.cc_self_compile_rejected
+            SelfCompile.Notice.Cancelled -> R.string.cc_self_compile_cancelled
+            SelfCompile.Notice.ConfirmationRequired -> R.string.cc_self_compile_confirmation
+            SelfCompile.Notice.Interrupted -> R.string.cc_self_compile_interrupted
+            SelfCompile.Notice.RecoveryRequired -> R.string.cc_self_compile_recovery
+            SelfCompile.Notice.Detached -> R.string.cc_self_compile_detached
+            SelfCompile.Notice.Failed -> R.string.cc_self_compile_failed
+            SelfCompile.Notice.Installed -> R.string.cc_self_compile_installed
+            SelfCompile.Notice.UpdateBusy -> R.string.cc_self_compile_update_busy
+        }
+        selfCompileNotice?.let { message ->
+            BasicText(
+                stringResource(message),
+                style = Type.Caption.copy(color = Palette.SecondaryLabel),
+                modifier = Modifier.padding(start = 44.dp, end = 14.dp, bottom = 6.dp),
+                maxLines = if (SelfCompile.notice == SelfCompile.Notice.RecoveryRequired) 4 else 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
         // Installed from the APK alone: how to finish, on the TV or with a computer.
@@ -449,6 +482,7 @@ private fun UpdatePage(vm: HomeViewModel, takeFocus: Boolean) {
                         Updates.Failure.Blocked -> R.string.cc_update_failed_blocked
                         Updates.Failure.NotOfficial -> R.string.cc_update_failed_signature
                         Updates.Failure.NotNewer -> R.string.cc_update_failed_older
+                        Updates.Failure.SelfCompileBusy -> R.string.cc_update_failed_self_compile
                     },
                 )
                 else -> stringResource(R.string.cc_update_current, Updates.current)
